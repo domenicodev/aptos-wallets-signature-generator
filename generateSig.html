@@ -1,0 +1,560 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>ED25519 Signature Generator</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        button { padding: 10px; margin: 10px 0; }
+        #output { white-space: pre-wrap; font-family: monospace; margin-top: 20px; border: 1px solid #ccc; padding: 10px; }
+    </style>
+</head>
+
+<body>
+    <h1>ED25519 Signature Generator</h1>
+    <button id="connectPontem">Connect Pontem Wallet</button>
+    <button id="connectNightly">Connect Nightly Wallet</button>
+    <button id="connectPetra">Connect Petra Wallet</button>
+    <button id="connectRazor">Connect Razor Wallet</button>
+    <button id="signMessage" disabled>Sign Message</button>
+    <button id="clearLogs">Clear Logs</button>
+    <div id="output" style="white-space: pre-wrap; font-family: monospace;"></div>
+
+    <script type="module">
+        // Import noble-ed25519 from a CDN
+        import * as ed25519 from 'https://cdn.jsdelivr.net/npm/@noble/ed25519@1.7.3/+esm';
+
+        // Helper to output to page
+        function log(text) {
+            document.getElementById('output').textContent += text + '\n';
+        }
+
+        // Helper to add a section header
+        function logHeader(text) {
+            log('\n' + '='.repeat(50));
+            log(' ' + text.toUpperCase());
+            log('='.repeat(50) + '\n');
+        }
+
+        // Buffer implementation for browsers
+        class Buffer {
+            constructor(input, encoding) {
+                if (typeof input === 'string') {
+                    if (encoding === 'hex') {
+                        this.data = new Uint8Array(input.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
+                    } else if (encoding === 'utf8' || !encoding) {
+                        this.data = new TextEncoder().encode(input);
+                    }
+                } else if (input instanceof Uint8Array) {
+                    this.data = input;
+                } else if (Array.isArray(input)) {
+                    this.data = new Uint8Array(input);
+                }
+            }
+
+            static from(input, encoding) {
+                return new Buffer(input, encoding);
+            }
+
+            static concat(buffers) {
+                const totalLength = buffers.reduce((acc, buf) => acc + buf.data.length, 0);
+                const result = new Uint8Array(totalLength);
+                let offset = 0;
+                for (const buf of buffers) {
+                    result.set(buf.data, offset);
+                    offset += buf.data.length;
+                }
+                return new Buffer(result);
+            }
+
+            static alloc(size) {
+                return new Buffer(new Uint8Array(size));
+            }
+
+            toString(encoding) {
+                if (encoding === 'hex') {
+                    return Array.from(this.data)
+                        .map(b => b.toString(16).padStart(2, '0'))
+                        .join('');
+                }
+                return new TextDecoder().decode(this.data);
+            }
+
+            writeBigUInt64LE(value, offset = 0) {
+                const view = new DataView(this.data.buffer);
+                const lowWord = Number(value & 0xffffffffn);
+                const highWord = Number(value >> 32n);
+                view.setUint32(offset, lowWord, true);
+                view.setUint32(offset + 4, highWord, true);
+            }
+        }
+
+        // Create the message that would be signed (same format as in proxy.move)
+        function createMessage(publicKey, caip, caipAddress, deadline) {
+            // Remove 0x prefix if present
+            publicKey = publicKey.replace(/^0x/, '');
+            
+            // Convert inputs to Buffer objects
+            const pubKeyBuf = Buffer.from(publicKey, 'hex');
+            const caipBuf = Buffer.from(caip, 'utf8');
+            const caipAddrBuf = Buffer.from(caipAddress, 'hex');
+            const deadlineBuf = Buffer.alloc(8);
+            deadlineBuf.writeBigUInt64LE(BigInt(deadline));
+
+            // Concatenate all parts to create the final message
+            return Buffer.concat([pubKeyBuf, caipBuf, caipAddrBuf, deadlineBuf]);
+        }
+
+        // Wallet connection and management
+        let wallet = null;
+        let walletType = null;
+        let walletPublicKey = null;
+
+        async function connectPontem() {
+            try {
+                logHeader("pontem wallet");
+                // Check if Pontem wallet is available
+                if (!window.pontem) {
+                    throw new Error("Pontem wallet not found. Please install the Pontem wallet extension.");
+                }
+
+                // Connect to Pontem wallet
+                wallet = window.pontem;
+                walletType = "pontem";
+                
+                // First connect to get the address
+                await wallet.connect();
+                const account = await wallet.account();
+                log(`Connected to Pontem wallet: ${account.address}`);
+                
+                // Then get the public key using the publicKey() method
+                walletPublicKey = await wallet.publicKey();
+                
+                if (!walletPublicKey) {
+                    throw new Error("Could not get public key from Pontem wallet");
+                }
+                
+                // Ensure publicKey is a string before using string methods
+                if (typeof walletPublicKey === 'string') {
+                    walletPublicKey = walletPublicKey.replace(/^0x/, ''); // Remove 0x prefix if present
+                } else if (walletPublicKey) {
+                    // Handle case where publicKey might be in a different format
+                    try {
+                        walletPublicKey = Buffer.from(walletPublicKey).toString('hex');
+                    } catch (e) {
+                        log(`Error converting public key: ${e.message}`);
+                        throw new Error("Public key is in an unsupported format");
+                    }
+                } else {
+                    throw new Error("No public key returned from wallet");
+                }
+                
+                log(`Public Key: ${walletPublicKey}`);
+                
+                // Enable sign button
+                document.getElementById('signMessage').disabled = false;
+            } catch (error) {
+                log('Pontem wallet connection error: ' + error.message);
+                console.error(error);
+            }
+        }
+
+        async function connectNightly() {
+            try {
+                logHeader("nightly wallet");
+                // Check if Nightly wallet is available
+                if (!window.nightly?.aptos) {
+                    throw new Error("Nightly wallet not found. Please install the Nightly wallet extension.");
+                }
+
+                // Connect to Nightly wallet
+                wallet = window.nightly.aptos;
+                walletType = "nightly";
+                
+                await wallet.connect();
+                
+                // Get account info
+                const account = await wallet.getAccount();
+                
+                // Check if account exists
+                if (!account) {
+                    throw new Error("Could not get account from Nightly wallet");
+                }
+                
+                // Get the public key from the account
+                walletPublicKey = account.publicKey;
+                
+                if (!walletPublicKey) {
+                    throw new Error("Could not get public key from Nightly wallet");
+                }
+                
+                // Convert public key to hex string
+                if (typeof walletPublicKey === 'string') {
+                    walletPublicKey = walletPublicKey.replace(/^0x/, '');
+                } else if (walletPublicKey instanceof Uint8Array) {
+                    walletPublicKey = Array.from(walletPublicKey)
+                        .map(b => b.toString(16).padStart(2, '0'))
+                        .join('');
+                } else if (Array.isArray(walletPublicKey)) {
+                    walletPublicKey = walletPublicKey
+                        .map(b => b.toString(16).padStart(2, '0'))
+                        .join('');
+                } else if (typeof walletPublicKey === 'object') {
+                    // Try to handle object format
+                    try {
+                        const bytes = Object.values(walletPublicKey);
+                        walletPublicKey = bytes
+                            .map(b => b.toString(16).padStart(2, '0'))
+                            .join('');
+                    } catch (e) {
+                        throw new Error("Could not convert public key object to hex string");
+                    }
+                } else {
+                    throw new Error("Public key is in an unsupported format: " + typeof walletPublicKey);
+                }
+                
+                log(`Connected to Nightly wallet: ${account.address}`);
+                log(`Public Key: ${walletPublicKey}`);
+                
+                // Enable sign button
+                document.getElementById('signMessage').disabled = false;
+            } catch (error) {
+                log('Nightly wallet connection error: ' + error.message);
+                console.error(error);
+            }
+        }
+
+        async function connectPetra() {
+            try {
+                logHeader("petra wallet");
+                // Check if Petra wallet is available
+                if (!window.petra) {
+                    throw new Error("Petra wallet not found. Please install the Petra wallet extension.");
+                }
+
+                // Connect to Petra wallet
+                wallet = window.petra;
+                walletType = "petra";
+                
+                // Connect and get the account
+                await wallet.connect();
+                const account = await wallet.account();
+                
+                if (!account) {
+                    throw new Error("Could not get account from Petra wallet");
+                }
+                
+                log(`Connected to Petra wallet: ${account.address}`);
+                
+                // Get the public key
+                walletPublicKey = account.publicKey;
+                
+                if (!walletPublicKey) {
+                    throw new Error("Could not get public key from Petra wallet");
+                }
+                
+                // Ensure publicKey is a string without 0x prefix
+                if (typeof walletPublicKey === 'string') {
+                    walletPublicKey = walletPublicKey.replace(/^0x/, '');
+                } else if (walletPublicKey instanceof Uint8Array) {
+                    walletPublicKey = Array.from(walletPublicKey)
+                        .map(b => b.toString(16).padStart(2, '0'))
+                        .join('');
+                } else if (Array.isArray(walletPublicKey)) {
+                    walletPublicKey = walletPublicKey
+                        .map(b => b.toString(16).padStart(2, '0'))
+                        .join('');
+                } else if (typeof walletPublicKey === 'object') {
+                    try {
+                        const bytes = Object.values(walletPublicKey);
+                        walletPublicKey = bytes
+                            .map(b => b.toString(16).padStart(2, '0'))
+                            .join('');
+                    } catch (e) {
+                        throw new Error("Could not convert public key object to hex string");
+                    }
+                } else {
+                    throw new Error("Public key is in an unsupported format: " + typeof walletPublicKey);
+                }
+                
+                log(`Public Key: ${walletPublicKey}`);
+                
+                // Enable sign button
+                document.getElementById('signMessage').disabled = false;
+            } catch (error) {
+                log('Petra wallet connection error: ' + error.message);
+                console.error(error);
+            }
+        }
+
+        async function connectRazor() {
+            try {
+                logHeader("razor wallet");
+                // Check if Razor wallet is available
+                if (!window.razor) {
+                    throw new Error("Razor wallet not found. Please install the Razor wallet extension.");
+                }
+
+                // Connect to Razor wallet
+                wallet = window.razor;
+                walletType = "razor";
+                
+                // Connect and get the account
+                await wallet.connect();
+                const account = await wallet.account();
+                
+                if (!account) {
+                    throw new Error("Could not get account from Razor wallet");
+                }
+                
+                log(`Connected to Razor wallet: ${account.address}`);
+                
+                // Get the public key
+                walletPublicKey = account.publicKey;
+                
+                if (!walletPublicKey) {
+                    throw new Error("Could not get public key from Razor wallet");
+                }
+                
+                // Ensure publicKey is a string without 0x prefix
+                if (typeof walletPublicKey === 'string') {
+                    walletPublicKey = walletPublicKey.replace(/^0x/, '');
+                } else if (walletPublicKey instanceof Uint8Array) {
+                    walletPublicKey = Array.from(walletPublicKey)
+                        .map(b => b.toString(16).padStart(2, '0'))
+                        .join('');
+                } else if (Array.isArray(walletPublicKey)) {
+                    walletPublicKey = walletPublicKey
+                        .map(b => b.toString(16).padStart(2, '0'))
+                        .join('');
+                } else if (typeof walletPublicKey === 'object') {
+                    try {
+                        const bytes = Object.values(walletPublicKey);
+                        walletPublicKey = bytes
+                            .map(b => b.toString(16).padStart(2, '0'))
+                            .join('');
+                    } catch (e) {
+                        throw new Error("Could not convert public key object to hex string");
+                    }
+                } else {
+                    throw new Error("Public key is in an unsupported format: " + typeof walletPublicKey);
+                }
+                
+                log(`Public Key: ${walletPublicKey}`);
+                
+                // Enable sign button
+                document.getElementById('signMessage').disabled = false;
+            } catch (error) {
+                log('Razor wallet connection error: ' + error.message);
+                console.error(error);
+            }
+        }
+
+        async function signWithWallet() {
+            try {
+                if (!wallet || !walletPublicKey) {
+                    throw new Error("Wallet not connected");
+                }
+
+                // Example data
+                const ethereum_caip = '_CAIP_';
+                const ethereum_address = '_ADDR_';
+                const deadline = 0; // Current time in microseconds
+
+                // Create the message
+                const message = createMessage(
+                    walletPublicKey,
+                    ethereum_caip,
+                    ethereum_address,
+                    deadline
+                );
+
+                // Convert to hex string for wallet signing
+                const messageHex = '0x' + message.toString('hex');
+                let signature;
+
+                // Sign based on wallet type
+                if (walletType === "pontem") {
+                    logHeader("pontem wallet");
+                    log("Attempting to sign with Pontem wallet...");
+                    log(`Message to sign: ${messageHex}`);
+                    
+                    const signatureResponse = await wallet.signMessage({
+                        message: messageHex
+                    });
+                    
+                    // Debug the signature response
+                    log("Signature response:");
+                    log(JSON.stringify(signatureResponse, null, 2));
+                    
+                    // Check if signature exists in the response
+                    if (!signatureResponse || !signatureResponse.result) {
+                        throw new Error("Invalid response from wallet");
+                    }
+                    
+                    // Convert the signature object to a Uint8Array
+                    const signatureBytes = new Uint8Array(64);
+                    for (let i = 0; i < 64; i++) {
+                        signatureBytes[i] = signatureResponse.result.signature[i];
+                    }
+                    
+                    // Convert the Uint8Array to a hex string
+                    signature = Array.from(signatureBytes)
+                        .map(b => b.toString(16).padStart(2, '0'))
+                        .join('');
+                    
+                } else if (walletType === "nightly") {
+                    logHeader("nightly wallet");
+                    log("Attempting to sign with Nightly wallet...");
+                    log(`Message to sign: ${messageHex}`);
+                    
+                    // Create the message payload according to Nightly's documentation
+                    const msgToSign = {
+                        message: messageHex
+                    };
+                    
+                    // Sign the message using Nightly's signMessage feature
+                    const signatureResponse = await wallet.features["aptos:signMessage"].signMessage(msgToSign);
+                    
+                    // Debug the signature response
+                    log("Signature response:");
+                    log(JSON.stringify(signatureResponse, null, 2));
+                    
+                    // Check if signature exists in the response
+                    if (!signatureResponse || !signatureResponse.args || !signatureResponse.args.signature) {
+                        throw new Error("Invalid signature response from wallet");
+                    }
+                    
+                    // Extract the signature bytes from the nested structure
+                    const signatureData = signatureResponse.args.signature.data.data;
+                    const signatureBytes = new Uint8Array(64);
+                    
+                    // Convert the object of bytes to a Uint8Array
+                    for (let i = 0; i < 64; i++) {
+                        signatureBytes[i] = signatureData[i];
+                    }
+                    
+                    // Convert the Uint8Array to a hex string
+                    signature = Array.from(signatureBytes)
+                        .map(b => b.toString(16).padStart(2, '0'))
+                        .join('');
+                    
+                    log('Extracted signature: ' + signature);
+                } else if (walletType === "petra") {
+                    logHeader("petra wallet");
+                    log("Attempting to sign with Petra wallet...");
+                    log(`Message to sign: ${messageHex}`);
+                    
+                    const signatureResponse = await wallet.signMessage({
+                        message: messageHex,
+                        address: true
+                    });
+                    
+                    // Debug the signature response
+                    log("Signature response:");
+                    log(JSON.stringify(signatureResponse, null, 2));
+                    
+                    // Extract the signature based on the response format
+                    if (signatureResponse && signatureResponse.signature) {
+                        if (typeof signatureResponse.signature === 'string') {
+                            signature = signatureResponse.signature.replace(/^0x/, '');
+                        } else if (Array.isArray(signatureResponse.signature) || signatureResponse.signature instanceof Uint8Array) {
+                            signature = Array.from(signatureResponse.signature)
+                                .map(b => b.toString(16).padStart(2, '0'))
+                                .join('');
+                        } else if (typeof signatureResponse.signature === 'object') {
+                            const signatureBytes = new Uint8Array(64);
+                            for (let i = 0; i < 64; i++) {
+                                signatureBytes[i] = signatureResponse.signature[i];
+                            }
+                            signature = Array.from(signatureBytes)
+                                .map(b => b.toString(16).padStart(2, '0'))
+                                .join('');
+                        } else {
+                            throw new Error("Unsupported signature format");
+                        }
+                    } else {
+                        throw new Error("No signature found in response");
+                    }
+                    
+                    log('Extracted signature: ' + signature);
+                } else if (walletType === "razor") {
+                    logHeader("razor wallet");
+                    log("Attempting to sign with Razor wallet...");
+                    log(`Message to sign: ${messageHex}`);
+                    
+                    const signatureResponse = await wallet.signMessage({
+                        message: messageHex
+                    });
+                    
+                    // Debug the signature response
+                    log("Signature response:");
+                    log(JSON.stringify(signatureResponse, null, 2));
+                    
+                    // Extract the signature based on the response format
+                    if (signatureResponse && signatureResponse.signature) {
+                        if (typeof signatureResponse.signature === 'string') {
+                            signature = signatureResponse.signature.replace(/^0x/, '');
+                        } else if (Array.isArray(signatureResponse.signature) || signatureResponse.signature instanceof Uint8Array) {
+                            signature = Array.from(signatureResponse.signature)
+                                .map(b => b.toString(16).padStart(2, '0'))
+                                .join('');
+                        } else if (typeof signatureResponse.signature === 'object') {
+                            const signatureBytes = new Uint8Array(64);
+                            for (let i = 0; i < 64; i++) {
+                                signatureBytes[i] = signatureResponse.signature[i];
+                            }
+                            signature = Array.from(signatureBytes)
+                                .map(b => b.toString(16).padStart(2, '0'))
+                                .join('');
+                        } else {
+                            throw new Error("Unsupported signature format");
+                        }
+                    } else {
+                        throw new Error("No signature found in response");
+                    }
+                    
+                    log('Extracted signature: ' + signature);
+                }
+                
+                logHeader("aptos values");
+                log('Signature: ' + signature);
+
+                // Use these values in your Move test:
+                log('\nValues for Move test:');
+                log(`let public_key = x"${walletPublicKey}";`);
+                log(`let ethereum_caip = string::utf8(b"${ethereum_caip}");`);
+                log(`let eth_address = x"${ethereum_address}";`);
+                log(`let deadline = ${deadline}u64; // timestamp`);
+                log(`let signature_bytes = x"${signature}";`);
+
+            } catch (error) {
+                log('Signing error: ' + error.message);
+                console.error(error);
+            }
+        }
+
+        // Set up button event listeners
+        document.getElementById('connectPontem').addEventListener('click', connectPontem);
+        document.getElementById('connectNightly').addEventListener('click', connectNightly);
+        document.getElementById('connectPetra').addEventListener('click', connectPetra);
+        document.getElementById('connectRazor').addEventListener('click', connectRazor);
+        document.getElementById('signMessage').addEventListener('click', signWithWallet);
+        document.getElementById('clearLogs').addEventListener('click', () => {
+            document.getElementById('output').textContent = '';
+            log('Welcome to ED25519 Signature Generator');
+            log('Please connect your wallet');
+        });
+
+        // Initial setup
+        function initialize() {
+            log('Welcome to ED25519 Signature Generator');
+            log('Please connect your Pontem, Nightly, Petra, or Razor wallet');
+        }
+
+        // Run initialization
+        initialize();
+    </script>
+</body>
+
+</html>
