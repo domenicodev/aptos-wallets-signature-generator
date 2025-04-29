@@ -19,7 +19,7 @@ export async function signWithWallet({
       logHeader('pontem wallet');
       log('Attempting to sign with Pontem wallet...');
       log(`Message to sign: ${messageHex}`);
-      const signatureResponse = await wallet.signMessage({ message: messageHex });
+      const signatureResponse = await wallet.signMessage({ message: messageHex, nonce: '0' });
       log('Signature response:');
       log(JSON.stringify(signatureResponse, null, 2));
       if (!signatureResponse || !signatureResponse.result) throw new Error('Invalid response from wallet');
@@ -30,7 +30,7 @@ export async function signWithWallet({
       logHeader('nightly wallet');
       log('Attempting to sign with Nightly wallet...');
       log(`Message to sign: ${messageHex}`);
-      const msgToSign = { message: messageHex };
+      const msgToSign = { message: messageHex, nonce: '0' };
       const signatureResponse = await wallet.features["aptos:signMessage"].signMessage(msgToSign);
       log('Signature response:');
       log(JSON.stringify(signatureResponse, null, 2));
@@ -44,7 +44,7 @@ export async function signWithWallet({
       logHeader('petra wallet');
       log('Attempting to sign with Petra wallet...');
       log(`Message to sign: ${messageHex}`);
-      const signatureResponse = await wallet.signMessage({ message: messageHex, application: undefined });
+      const signatureResponse = await wallet.signMessage({ message: messageHex, application: undefined, nonce: '0' });
       log('Signature response:');
       log(JSON.stringify(signatureResponse, null, 2));
       if (signatureResponse && signatureResponse.signature) {
